@@ -1,0 +1,51 @@
+# name: test/sql/tera.test
+# description: test tera extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT tera_render('');
+----
+Catalog Error: Scalar Function with name tera_render does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require tera
+
+# Render the template with a JSON context as the second argument
+query T
+SELECT tera_render('{{ foo }}', '{"foo": "bar"}')
+----
+bar
+
+# Demonstrate that rendering without a context is possible, but if you
+# reference unknown variables an error will be raised.
+statement error
+SELECT tera_render('{{ foo }}')
+----
+Invalid Input Error: Error rendering template: Tera render error: Failed to render '__tera_one_off'
+Caused by: Variable `foo` not found in context while rendering '__tera_one_off'
+
+# Demonstrate that by default autoescaping is applied.
+query T
+SELECT tera_render('{{ v }}', '{"v": "B&O"}')
+----
+B&amp;O
+
+# Test that autoescaping can be disabled.
+query T
+SELECT tera_render('{{ v }}', '{"v": "B&O"}', autoescape := false)
+----
+B&O
+
+# Demonstrate how a template path can be specified and then the template
+# filename is passed as the first parameter
+query T
+SELECT tera_render('index.html', '{"v": "B&O"}', autoescape := false, template_path := './templates/*.html')
+----
+B&O
+
+# Demonstrate the error that happens when a unknown template is specified.
+statement error
+SELECT tera_render('index2.html', '{"v": "B&O"}', autoescape := false, template_path := './templates/*.html')
+----
+Invalid Input Error: Error rendering template: Tera render error: Template 'index2.html' not found

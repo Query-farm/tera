@@ -1,8 +1,9 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
 # Extension from this repo
-duckdb_extension_load(quack
+duckdb_extension_load(tera
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
+    LINKED_LIBS "../../cargo/build/wasm32-unknown-emscripten/release/libtera_binding.a"
     LOAD_TESTS
 )
 

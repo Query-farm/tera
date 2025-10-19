@@ -1,146 +1,324 @@
-# DuckDB Extension Template
-This repository contains a template for creating a DuckDB extension. The main goal of this template is to allow users to easily develop, test and distribute their own DuckDB extension. The main branch of the template is always based on the latest stable DuckDB allowing you to try out your extension right away.
+# DuckDB Tera Extension by [Query.Farm](https://query.farm)
 
-## Getting started
-First step to getting started is to create your own repo from this template by clicking `Use this template`. Then clone your new repository using 
-```sh
-git clone --recurse-submodules https://github.com/<you>/<your-new-extension-repo>.git
-```
-Note that `--recurse-submodules` will ensure DuckDB is pulled which is required to build the extension.
+The **Tera** extension, developed by **[Query.Farm](https://query.farm)**, brings powerful template rendering capabilities directly to your SQL queries in DuckDB. Generate dynamic text, HTML, configuration files, and reports using the robust Tera templating engine without leaving your database environment.
 
-## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-cd <your-working-dir-not-the-plugin-repo>
-git clone https://github.com/Microsoft/vcpkg.git
-sh ./vcpkg/scripts/bootstrap.sh -disableMetrics
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
+## Use Cases
 
-### Build steps
-Now to build the extension, run:
-```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/<extension_name>/<extension_name>.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded. 
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `<extension_name>.duckdb_extension` is the loadable binary as it would be distributed.
+The Tera extension is perfect for:
+- **Dynamic report generation**: Create custom formatted reports with data from your database
+- **Configuration file generation**: Generate config files, scripts, and infrastructure-as-code templates
+- **HTML/XML generation**: Build web pages, emails, and XML documents with database content
+- **Data transformation**: Convert structured data into various text formats
+- **Notification templates**: Create personalized messages, alerts, and communications
+- **ETL pipeline outputs**: Transform data into specific formats required by downstream systems
+- **Dynamic SQL generation**: Create parameterized queries and DDL statements
+- **Internationalization**: Generate localized content using template variables
 
-### Tips for speedy builds
-DuckDB extensions currently rely on DuckDB's build system to provide easy testing and distributing. This does however come at the downside of requiring the template to build DuckDB and its unittest binary every time you build your extension. To mitigate this, we highly recommend installing [ccache](https://ccache.dev/) and [ninja](https://ninja-build.org/). This will ensure you only need to build core DuckDB once and allows for rapid rebuilds.
+## Installation
 
-To build using ninja and ccache ensure both are installed and run:
+**`tera` is a [DuckDB Community Extension](https://github.com/duckdb/community-extensions).**
 
-```sh
-GEN=ninja make
+You can now use this by using this SQL:
+
+```sql
+INSTALL tera FROM community;
+LOAD tera;
 ```
 
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`. This shell will have the extension pre-loaded.  
+## Functions
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `quack()` that takes a string arguments and returns a string:
-```
-D select quack('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Quack Jane 🐥 │
-└───────────────┘
-```
+### `tera_render(template, context, ...options)`
+Renders Tera templates with JSON context data and customizable options.
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
-make test
-```
+**Basic Usage:**
+```sql
+-- Simple variable substitution
+SELECT tera_render('{{ foo }}', '{"foo": "bar"}');
+┌────────────────────────────────────────────┐
+│ tera_render('{{ foo }}', '{"foo": "bar"}') │
+│                  varchar                   │
+├────────────────────────────────────────────┤
+│ bar                                        │
+└────────────────────────────────────────────┘
 
-## Getting started with your own extension
-After creating a repository from this template, the first step is to name your extension. To rename the extension, run:
-```
-python3 ./scripts/bootstrap-template.py <extension_name_you_want>
-```
-Feel free to delete the script after this step.
-
-Now you're good to go! After a (re)build, you should now be able to use your duckdb extension:
-```
-./build/release/duckdb
-D select <extension_name_you_chose>('Jane') as result;
-┌─────────────────────────────────────┐
-│                result               │
-│               varchar               │
-├─────────────────────────────────────┤
-│ <extension_name_you_chose> Jane 🐥  │
-└─────────────────────────────────────┘
+-- Template without context (will error if variables are referenced)
+SELECT tera_render('Hello, World!');
+┌──────────────────────────────┐
+│ tera_render('Hello, World!') │
+│           varchar            │
+├──────────────────────────────┤
+│ Hello, World!                │
+└──────────────────────────────┘
 ```
 
-For inspiration/examples on how to extend DuckDB in a more meaningful way, check out the [test extensions](https://github.com/duckdb/duckdb/blob/main/test/extension),
-the [in-tree extensions](https://github.com/duckdb/duckdb/tree/main/extension), and the [out-of-tree extensions](https://github.com/duckdblabs).
+**Advanced Context Usage:**
+```sql
+-- Complex JSON context with nested objects
+SELECT tera_render(
+    'Hello {{ user.name }}, you have {{ user.messages }} new messages!',
+    '{"user": {"name": "Alice", "messages": 5}}'
+) as output;
+┌───────────────────────────────────────┐
+│                output                 │
+│                varchar                │
+├───────────────────────────────────────┤
+│ Hello Alice, you have 5 new messages! │
+└───────────────────────────────────────┘
 
-## Distributing your extension
-To distribute your extension binaries, there are a few options.
-
-### Community extensions
-The recommended way of distributing extensions is through the [community extensions repository](https://github.com/duckdb/community-extensions).
-This repository is designed specifically for extensions that are built using this extension template, meaning that as long as your extension can be
-built using the default CI in this template, submitting it to the community extensions is a very simple process. The process works similarly to popular
-package managers like homebrew and vcpkg, where a PR containing a descriptor file is submitted to the package manager repository. After the CI in the 
-community extensions repository completes, the extension can be installed and loaded in DuckDB with:
-```SQL
-INSTALL <my_extension> FROM community;
-LOAD <my_extension>
-```
-For more information, see the [community extensions documentation](https://duckdb.org/community_extensions/documentation).
-
-### Downloading artifacts from GitHub
-The default CI in this template will automatically upload the binaries for every push to the main branch as GitHub Actions artifacts. These
-can be downloaded manually and then loaded directly using:
-```SQL
-LOAD '/path/to/downloaded/extension.duckdb_extension';
-```
-Note that this will require starting DuckDB with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. For the CLI it is done like:
-```shell
-duckdb -unsigned
+-- Using arrays and loops
+SELECT tera_render(
+    'Items: {% for item in items %}{{ item.name }}{% if not loop.last %}, {% endif %}{% endfor %}',
+    '{"items": [{"name": "Apple"}, {"name": "Banana"}, {"name": "Cherry"}]}'
+) as output;
+┌──────────────────────────────┐
+│            output            │
+│           varchar            │
+├──────────────────────────────┤
+│ Items: Apple, Banana, Cherry │
+└──────────────────────────────┘
 ```
 
-### Uploading to a custom repository
-If for some reason distributing through community extensions is not an option, extensions can also be uploaded to a custom extension repository.
-This will give some more control over where and how the extensions are distributed, but comes with the downside of requiring the `allow_unsigned_extensions`
-option to be set. For examples of how to configure a manual GitHub Actions deploy pipeline, check out the extension deploy script in https://github.com/duckdb/extension-ci-tools.
-Some examples of extensions that use this CI/CD workflow check out [spatial](https://github.com/duckdblabs/duckdb_spatial) or [aws](https://github.com/duckdb/duckdb_aws).
+**HTML Generation with Autoescaping:**
+```sql
+-- Default autoescaping (enabled)
+SELECT tera_render('{{ v }}', '{"v": "B&O"}') as output;
+┌─────────┐
+│ output  │
+│ varchar │
+├─────────┤
+│ B&amp;O │
+└─────────┘
 
-Extensions in custom repositories can be installed and loaded using:
-```SQL
-INSTALL <my_extension> FROM 'http://my-custom-repo'
-LOAD <my_extension>
+-- Disable autoescaping for raw output
+SELECT tera_render('{{ v }}', '{"v": "B&O"}', autoescape := false) as output;
+┌─────────┐
+│ output  │
+│ varchar │
+├─────────┤
+│ B&O     │
+└─────────┘
 ```
 
-### Versioning of your extension
-Extension binaries will only work for the specific DuckDB version they were built for. The version of DuckDB that is targeted 
-is set to the latest stable release for the main branch of the template so initially that is all you need. As new releases 
-of DuckDB are published however, the extension repository will need to be updated. The template comes with a workflow set-up
-that will automatically build the binaries for all DuckDB target architectures that are available in the corresponding DuckDB
-version. This workflow is found in `.github/workflows/MainDistributionPipeline.yml`. It is up to the extension developer to keep
-this up to date with DuckDB. Note also that its possible to distribute binaries for multiple DuckDB versions in this workflow 
-by simply duplicating the jobs.
+**Template File Rendering:**
+```sql
+-- Render from template files with custom path
+SELECT tera_render(
+    'index.html',
+    '{"v": "B&O"}',
+    autoescape := false,
+    template_path := './templates/*.html'
+) as output;
+┌─────────┐
+│ output  │
+│ varchar │
+├─────────┤
+│ B&O     │
+└─────────┘
+```
 
-## Setting up CLion 
+**Error Handling:**
+```sql
+-- Template errors are reported clearly
+SELECT tera_render('{{ missing_var }}');
+--- Error rendering template: Tera render error: Failed to render '__tera_one_off'
+--Caused by: Variable `missing_var` not found in context while rendering '__tera_one_off'
 
-### Opening project
-Configuring CLion with the extension template requires a little work. Firstly, make sure that the DuckDB submodule is available. 
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
+-- File not found errors
+SELECT tera_render('nonexistent.html', '{}', template_path := './templates/*.html');
+-- Error: Template 'nonexistent.html' not found
+```
 
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`. Now on a clean repository you will first need to run `make {build type}` to initialize the CMake build directory. After running make, you will be able to (re)build from CLion by using the build target we just created. If you use the CLion editor, you can create a CLion CMake profiles matching the CMake variables that are described in the makefile, and then you don't need to invoke the Makefile.
+**Parameters:**
+- `template`: Template string or filename (when using `template_path`)
+- `context`: Any object that can be coerced to JSON, most often should be a JSON map.
+- `autoescape`: Boolean, enable/disable HTML autoescaping (default: `true`)
+- `autoescape_on`: `VARCHAR[]`, A list of file extensions where autoescaping should be applied.
+- `template_path`: File glob pattern for template files (enables file mode)
 
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+**Template Syntax:**
+The Tera extension uses the full Tera templating language, which includes:
+
+- **Variables**: `{{ variable_name }}`
+- **Filters**: `{{ name | upper }}`, `{{ price | round(precision=2) }}`
+- **Control structures**:
+  ```
+  {% if condition %}...{% endif %}
+  {% for item in list %}...{% endfor %}
+  {% set var = value %}
+  ```
+- **Comments**: `{# This is a comment #}`
+- **Template inheritance**: `{% extends "base.html" %}`, `{% block content %}...{% endblock %}`
+- **Macros**: `{% macro button(text) %}...{% endmacro %}`
+
+## Real-World Examples
+
+### Generate HTML Reports
+```sql
+-- Create a sales report
+SELECT tera_render('
+<h1>Sales Report - {{ report_date }}</h1>
+<table>
+  <tr><th>Product</th><th>Sales</th><th>Revenue</th></tr>
+  {% for item in sales %}
+  <tr>
+    <td>{{ item.product }}</td>
+    <td>{{ item.quantity }}</td>
+    <td>${{ item.revenue | round(precision=2) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p>Total Revenue: ${{ total_revenue | round(precision=2) }}</p>
+', '{"report_date":"2024-10-19","sales":[{"product":"Widget A","quantity":150,"revenue":1500.0},{"product":"Widget B","quantity":200,"revenue":3000.0}],"total_revenue":4500.0}');
+```
+
+### Configuration File Generation
+```sql
+-- Generate application config
+SELECT tera_render('
+[database]
+host = "{{ db.host }}"
+port = {{ db.port }}
+name = "{{ db.name }}"
+
+[features]
+{% for feature in features %}
+{{ feature.name }} = {{ feature.enabled | lower }}
+{% endfor %}
+
+[logging]
+level = "{{ log_level | upper }}"
+', json_object(
+    'db', json_object('host', 'localhost', 'port', 5432, 'name', 'myapp'),
+    'features', json_array(
+        json_object('name', 'analytics', 'enabled', true),
+        json_object('name', 'debug_mode', 'enabled', false)
+    ),
+    'log_level', 'info'
+));
+```
+
+### Dynamic Email Templates
+```sql
+-- Personalized email generation
+SELECT
+    user_email,
+    tera_render('
+Subject: Welcome {{ user.first_name }}!
+
+Dear {{ user.first_name }} {{ user.last_name }},
+
+Welcome to our platform! Here are your account details:
+- Username: {{ user.username }}
+- Account Type: {{ user.account_type | title }}
+- Sign-up Date: {{ signup_date }}
+
+{% if user.account_type == "premium" %}
+As a premium member, you have access to:
+{% for feature in premium_features %}
+- {{ feature }}
+{% endfor %}
+{% endif %}
+
+Best regards,
+The Team
+    ', json_object(
+        'user', json_object(
+            'first_name', first_name,
+            'last_name', last_name,
+            'username', username,
+            'account_type', account_type
+        ),
+        'signup_date', signup_date::text,
+        'premium_features', CASE
+            WHEN account_type = 'premium'
+            THEN json_array('Advanced Analytics', 'Priority Support', 'Custom Integrations')
+            ELSE json_array()
+        END
+    )) as email_content
+FROM users
+WHERE created_date >= current_date - interval '1 day';
+```
+
+### JSON/API Response Generation
+```sql
+-- Generate API responses
+SELECT tera_render('
+{
+  "status": "{{ status }}",
+  "timestamp": "{{ timestamp }}",
+  "data": {
+    "user_count": {{ metrics.users }},
+    "active_sessions": {{ metrics.sessions }},
+    "success_rate": {{ metrics.success_rate }}
+  },
+  "alerts": [
+    {% for alert in alerts %}
+    {
+      "level": "{{ alert.level }}",
+      "message": "{{ alert.message }}",
+      "count": {{ alert.count }}
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ]
+}', json_object(
+    'status', 'ok',
+    'timestamp', now()::text,
+    'metrics', json_object(
+        'users', 1250,
+        'sessions', 89,
+        'success_rate', 0.997
+    ),
+    'alerts', json_array(
+        json_object('level', 'warning', 'message', 'High CPU usage', 'count', 3),
+        json_object('level', 'info', 'message', 'Scheduled maintenance', 'count', 1)
+    )
+));
+```
+
+## Available Filters
+
+Tera includes many built-in filters for data transformation:
+
+- **String filters**: `upper`, `lower`, `title`, `trim`, `replace`, `split`
+- **Number filters**: `round`, `abs`, `ceil`, `floor`
+- **Array filters**: `first`, `last`, `length`, `join`, `reverse`, `sort`
+- **Date filters**: `date`, `strftime`
+- **Formatting**: `format`, `pluralize`, `truncate`
+- **Encoding**: `urlencode`, `escape`, `safe`
+
+Example usage:
+```sql
+SELECT tera_render('
+Name: {{ name | title }}
+Email: {{ email | lower }}
+Price: ${{ price | round(precision=2) }}
+Tags: {{ tags | join(sep=", ") }}
+', '{"name": "john doe", "email": "JOHN@EXAMPLE.COM", "price": 19.999, "tags": ["new", "featured", "sale"]}');
+```
+
+## Tips and Best Practices
+
+1. **Use JSON context effectively**: Structure your context data to match your template needs
+2. **Enable autoescaping for HTML**: Keep the default `autoescape := true` when generating HTML to prevent XSS
+3. **Organize templates in files**: Use `template_path` for complex templates and template inheritance
+4. **Handle errors gracefully**: Tera provides clear error messages for debugging template issues
+5. **Leverage filters**: Use built-in filters to transform data within templates instead of preprocessing
+6. **Test with small datasets**: Develop templates with simple test data before applying to large result sets
+7. **Consider performance**: Complex templates with large datasets may impact query performance
+
+## Error Messages
+
+The Tera extension provides detailed error messages to help debug template issues:
+
+- **Variable not found**: Clear indication of missing variables in context
+- **Template syntax errors**: Line numbers and descriptions of syntax issues
+- **File not found**: Specific error when template files can't be located
+- **Filter errors**: Information about incorrect filter usage or arguments
+
+## Contributing
+
+The Tera extension is open source and developed by [Query.Farm](https://query.farm). Contributions are welcome!
+
+## License
+
+[MIT License](LICENSE)
