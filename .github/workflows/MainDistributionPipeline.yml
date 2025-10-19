@@ -19,3 +19,4 @@ jobs:
       duckdb_version: v1.4-andium
       ci_tools_version: main
       extension_name: tera
+      enable_rust: true
