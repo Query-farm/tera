@@ -1,6 +1,6 @@
 # DuckDB Tera Extension by [Query.Farm](https://query.farm)
 
-The **Tera** extension, developed by **[Query.Farm](https://query.farm)**, brings powerful template rendering capabilities directly to your SQL queries in DuckDB. Generate dynamic text, HTML, configuration files, and reports using the robust Tera templating engine without leaving your database environment.
+The **Tera** extension, developed by **[Query.Farm](https://query.farm)**, brings powerful template rendering capabilities directly to your SQL queries in DuckDB. Generate dynamic text, HTML, configuration files, and reports using the robust [Tera](https://keats.github.io/tera/) templating engine without leaving your database environment.
 
 ## Use Cases
 
