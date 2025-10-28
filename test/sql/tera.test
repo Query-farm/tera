@@ -49,3 +49,4 @@ statement error
 SELECT tera_render('index2.html', '{"v": "B&O"}', autoescape := false, template_path := './templates/*.html')
 ----
 Invalid Input Error: Error rendering template: Tera render error: Template 'index2.html' not found
+

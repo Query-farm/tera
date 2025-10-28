@@ -110,9 +110,6 @@ inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &resu
 	auto &expression_vector = args.data[0];
 	const auto count = args.size();
 
-	UnifiedVectorFormat expression_vector_unified;
-	expression_vector.ToUnifiedFormat(count, expression_vector_unified);
-
 	std::vector<const char *> autoescape_on_ptrs;
 	for (const auto &s : bind_data.autoescape_on) {
 		autoescape_on_ptrs.push_back(s.c_str());
