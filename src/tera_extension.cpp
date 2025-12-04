@@ -12,6 +12,9 @@
 
 namespace duckdb {
 
+// Extension version - update this when releasing new versions
+constexpr const char *TERA_EXTENSION_VERSION = "2025101901";
+
 // Bar chart bind data structure
 struct TeraRenderBindData : public FunctionData {
 	string template_path;
@@ -178,7 +181,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		loader.RegisterFunction(render);
 	}
 
-	QueryFarmSendTelemetry(loader, "tera", "2025101901");
+	QueryFarmSendTelemetry(loader, "tera", TERA_EXTENSION_VERSION);
 }
 
 void TeraExtension::Load(ExtensionLoader &loader) {
@@ -189,7 +192,7 @@ std::string TeraExtension::Name() {
 }
 
 std::string TeraExtension::Version() const {
-	return "2025101901";
+	return TERA_EXTENSION_VERSION;
 }
 
 } // namespace duckdb
