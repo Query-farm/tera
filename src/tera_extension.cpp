@@ -4,7 +4,8 @@
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
-#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 
 #include "rust.h"
@@ -13,9 +14,9 @@
 namespace duckdb {
 
 // Extension version - update this when releasing new versions
-constexpr const char *TERA_EXTENSION_VERSION = "2025101901";
+constexpr const char *TERA_EXTENSION_VERSION = "2025121301";
 
-// Bar chart bind data structure
+// Tera render bind data structure
 struct TeraRenderBindData : public FunctionData {
 	string template_path;
 	bool autoescape = true;
@@ -53,17 +54,17 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 	vector<string> autoescape_on;
 	int optional_args = 0;
 
-	for (idx_t i = 1; i < arguments.size(); i++) {
+	for (idx_t i = bound_function.arguments.size(); i < arguments.size(); i++) {
 		const auto &arg = arguments[i];
+		const auto &alias = arg->GetAlias();
+		if (alias == "") {
+			continue;
+		}
 		if (arg->HasParameter()) {
 			throw ParameterNotResolvedException();
 		}
 		if (!arg->IsFoldable()) {
 			throw BinderException("tera_render: arguments must be constant");
-		}
-		const auto &alias = arg->GetAlias();
-		if (alias == "") {
-			continue;
 		}
 		if (alias == "autoescape") {
 			optional_args++;
@@ -82,9 +83,9 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 			optional_args++;
 
 			if (arg->return_type.InternalType() != PhysicalType::LIST) {
-				throw BinderException(
-				    StringUtil::Format("tera_render: 'autoescape_on' argument must be a list of strings it is %s",
-				                       arg->return_type.ToString()));
+				throw BinderException(StringUtil::Format(
+				    "tera_render: 'autoescape_extensions' argument must be a list of strings it is %s",
+				    arg->return_type.ToString()));
 			}
 
 			const auto list_children = ListValue::GetChildren(ExpressionExecutor::EvaluateScalar(context, *arg));
@@ -111,7 +112,6 @@ inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &resu
 	const auto &bind_data = func_expr.bind_info->Cast<TeraRenderBindData>();
 
 	auto &expression_vector = args.data[0];
-	const auto count = args.size();
 
 	std::vector<const char *> autoescape_on_ptrs;
 	for (const auto &s : bind_data.autoescape_on) {
@@ -178,7 +178,28 @@ static void LoadInternal(ExtensionLoader &loader) {
 		render_no_context.stability = FunctionStability::VOLATILE;
 		render.AddFunction(render_no_context);
 
-		loader.RegisterFunction(render);
+		CreateScalarFunctionInfo info(render);
+
+		// Documentation for tera_render(template, context) variant
+		FunctionDescription desc_with_context;
+		desc_with_context.parameter_names = {"template", "context"};
+		desc_with_context.parameter_types = {LogicalType::VARCHAR, LogicalType::JSON()};
+		desc_with_context.description = "Renders a Tera template string with JSON context variables";
+		desc_with_context.examples = {"tera_render('Hello {{ name }}!', '{\"name\": \"World\"}')",
+		                              "tera_render('{{ value | upper }}', '{\"value\": \"hello\"}')"};
+		desc_with_context.categories = {"text", "template"};
+		info.descriptions.push_back(desc_with_context);
+
+		// Documentation for tera_render(template) variant
+		FunctionDescription desc_no_context;
+		desc_no_context.parameter_names = {"template"};
+		desc_no_context.parameter_types = {LogicalType::VARCHAR};
+		desc_no_context.description = "Renders a Tera template string without context variables";
+		desc_no_context.examples = {"tera_render('Hello World!')"};
+		desc_no_context.categories = {"text", "template"};
+		info.descriptions.push_back(desc_no_context);
+
+		loader.RegisterFunction(info);
 	}
 
 	QueryFarmSendTelemetry(loader, "tera", TERA_EXTENSION_VERSION);

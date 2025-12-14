@@ -50,3 +50,16 @@ SELECT tera_render('index2.html', '{"v": "B&O"}', autoescape := false, template_
 ----
 Invalid Input Error: Error rendering template: Tera render error: Template 'index2.html' not found
 
+require json
+
+statement ok
+CREATE TABLE render_data (v JSON)
+
+statement ok
+INSERT INTO render_data values ('{"color": "red"}'),  ('{"color": "blue"}');
+
+query T
+SELECT tera_render('{{color}}', v) from render_data order by 1;
+----
+blue
+red
