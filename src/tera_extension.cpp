@@ -90,11 +90,10 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 
 			const auto list_children = ListValue::GetChildren(ExpressionExecutor::EvaluateScalar(context, *arg));
 			for (const auto &list_item : list_children) {
-				// These should also be lists.
 				if (list_item.type() != LogicalType::VARCHAR) {
-					throw BinderException(
-					    StringUtil::Format("tera_render: 'autoescape_on' child must be a string it is %s value is %s",
-					                       list_item.type().ToString(), list_item.ToString()));
+					throw BinderException(StringUtil::Format(
+					    "tera_render: 'autoescape_extensions' elements must be strings, got %s with value %s",
+					    list_item.type().ToString(), list_item.ToString()));
 				}
 
 				autoescape_on.push_back(list_item.GetValue<string>());
@@ -167,14 +166,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 		auto render_with_context =
 		    ScalarFunction({LogicalType::VARCHAR, LogicalType::JSON()}, LogicalType::VARCHAR, TeraRenderFunc,
 		                   TeraRenderBind, nullptr, nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
-		render_with_context.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		render_with_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
 		render_with_context.stability = FunctionStability::VOLATILE;
 		render.AddFunction(render_with_context);
 
 		auto render_no_context =
 		    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, TeraRenderFunc, TeraRenderBind, nullptr,
 		                   nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
-		render_no_context.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		render_no_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
 		render_no_context.stability = FunctionStability::VOLATILE;
 		render.AddFunction(render_no_context);
 
