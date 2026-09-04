@@ -14,7 +14,7 @@
 namespace duckdb {
 
 // Extension version - update this when releasing new versions
-constexpr const char *TERA_EXTENSION_VERSION = "2025121301";
+constexpr const char *TERA_EXTENSION_VERSION = "2026072501";
 
 // Tera render bind data structure
 struct TeraRenderBindData : public FunctionData {
