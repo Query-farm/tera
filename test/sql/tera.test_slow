@@ -18,3 +18,76 @@ statement error
 SELECT tera_render('index2.html', '{"v": "B&O"}', autoescape := false, template_path := './templates/*.html')
 ----
 Invalid Input Error: Error rendering template: Tera render error: Template 'index2.html' not found
+
+# Templates loaded from template_path are HTML-escaped by default, whatever
+# their file extension: autoescape defaults to true and autoescape_extensions
+# defaults to [], which means "escape every template".
+query T
+SELECT tera_render('index.html', '{"v": "<script>B&O</script>"}', template_path := './templates/*')
+----
+&lt;script&gt;B&amp;O&lt;&#x2F;script&gt;
+
+query T
+SELECT tera_render('note.txt', '{"v": "<script>B&O</script>"}', template_path := './templates/*')
+----
+&lt;script&gt;B&amp;O&lt;&#x2F;script&gt;
+
+# autoescape := false disables escaping.
+query T
+SELECT tera_render('note.txt', '{"v": "<script>B&O</script>"}', autoescape := false, template_path := './templates/*')
+----
+<script>B&O</script>
+
+# autoescape_extensions restricts escaping to templates whose file names end
+# with one of the given suffixes.
+query T
+SELECT tera_render('index.html', '{"v": "<b>"}', template_path := './templates/*', autoescape_extensions := ['.html'])
+----
+&lt;b&gt;
+
+query T
+SELECT tera_render('note.txt', '{"v": "<b>"}', template_path := './templates/*', autoescape_extensions := ['.html'])
+----
+<b>
+
+query T
+SELECT tera_render('note.txt', '{"v": "<b>"}', template_path := './templates/*', autoescape_extensions := ['.html', '.txt'])
+----
+&lt;b&gt;
+
+# autoescape := false wins over autoescape_extensions.
+query T
+SELECT tera_render('index.html', '{"v": "<b>"}', autoescape := false, template_path := './templates/*', autoescape_extensions := ['.html'])
+----
+<b>
+
+# Inline templates have no file name: autoescape_extensions does not apply to
+# them and autoescape alone decides.
+query T
+SELECT tera_render('{{ v }}', '{"v": "<b>"}', autoescape_extensions := ['.html'])
+----
+&lt;b&gt;
+
+query T
+SELECT tera_render('{{ v }}', '{"v": "<b>"}', autoescape := false, autoescape_extensions := ['.txt'])
+----
+<b>
+
+require json
+
+# The templates are loaded once per query and every row picks one by name.
+query II
+SELECT i, tera_render(CASE WHEN i % 2 = 0 THEN 'index.html' ELSE 'note.txt' END, json_object('v', '<' || i || '>'),
+                      template_path := './templates/*', autoescape_extensions := ['.html'])
+FROM range(4) t(i) ORDER BY i
+----
+0	&lt;0&gt;
+1	<1>
+2	&lt;2&gt;
+3	<3>
+
+query II
+SELECT count(*), count(DISTINCT r)
+FROM (SELECT tera_render('index.html', json_object('v', i), template_path := './templates/*.html') AS r FROM range(10000) t(i))
+----
+10000	10000

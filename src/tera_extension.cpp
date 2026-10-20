@@ -7,6 +7,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/execution/expression_executor_state.hpp"
 
 #include "rust.h"
 #include "query_farm_telemetry.hpp"
@@ -14,7 +15,7 @@
 namespace duckdb {
 
 // Extension version - update this when releasing new versions
-constexpr const char *TERA_EXTENSION_VERSION = "2026102001";
+constexpr const char *TERA_EXTENSION_VERSION = "2026102002";
 
 // Tera render bind data structure
 struct TeraRenderBindData : public FunctionData {
@@ -106,16 +107,96 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 	return make_uniq<TeraRenderBindData>(template_path, autoescape, autoescape_on, optional_args);
 }
 
-inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &result) {
-	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto &bind_data = func_expr.bind_info->Cast<TeraRenderBindData>();
+struct CompiledTemplateDeleter {
+	void operator()(CompiledTemplate *compiled) const {
+		free_compiled_template(compiled);
+	}
+};
+using CompiledTemplatePtr = std::unique_ptr<CompiledTemplate, CompiledTemplateDeleter>;
 
-	auto &expression_vector = args.data[0];
+// Parsing a template (and, for template_path, loading the files) costs far more than rendering it, so each
+// thread keeps the templates it has parsed for the duration of the query and renders every row from them.
+struct TeraRenderLocalState : public FunctionLocalState {
+	//! Inline templates, keyed by template text. A constant template argument is parsed once; a template
+	//! that differs between rows is cached up to MAX_INLINE_TEMPLATES distinct texts at a time.
+	static constexpr idx_t MAX_INLINE_TEMPLATES = 64;
+	unordered_map<string, CompiledTemplatePtr> inline_templates;
+	//! The most recently used inline template, checked before the map
+	string last_template;
+	optional_ptr<CompiledTemplate> last_compiled;
+	//! The templates loaded from template_path; loaded on the first non-NULL row
+	CompiledTemplatePtr path_templates;
+};
 
-	std::vector<const char *> autoescape_on_ptrs;
+static unique_ptr<FunctionLocalState>
+TeraRenderInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data) {
+	return make_uniq<TeraRenderLocalState>();
+}
+
+static CompiledTemplatePtr CompileTemplate(const TeraRenderBindData &bind_data, const char *source, idx_t source_len) {
+	vector<const char *> autoescape_on_ptrs;
 	for (const auto &s : bind_data.autoescape_on) {
 		autoescape_on_ptrs.push_back(s.c_str());
 	}
+	CompileResult compiled = compile_template(source, source_len, bind_data.template_path.c_str(), bind_data.autoescape,
+	                                          autoescape_on_ptrs.data(), autoescape_on_ptrs.size());
+	if (compiled.tag == CompileResult::Tag::Err) {
+		string err_str = string(compiled.err._0);
+		free_compile_error(compiled.err._0);
+		throw InvalidInputException("Error rendering template: " + err_str);
+	}
+	return CompiledTemplatePtr(compiled.ok._0);
+}
+
+static CompiledTemplate &GetCompiledTemplate(TeraRenderLocalState &lstate, const TeraRenderBindData &bind_data,
+                                             string_t expression) {
+	if (!bind_data.template_path.empty()) {
+		// The template argument names a template within the loaded set
+		if (!lstate.path_templates) {
+			lstate.path_templates = CompileTemplate(bind_data, "", 0);
+		}
+		return *lstate.path_templates;
+	}
+
+	if (lstate.last_compiled && expression.GetSize() == lstate.last_template.size() &&
+	    memcmp(expression.GetData(), lstate.last_template.data(), expression.GetSize()) == 0) {
+		return *lstate.last_compiled;
+	}
+	auto key = expression.GetString();
+	auto entry = lstate.inline_templates.find(key);
+	if (entry == lstate.inline_templates.end()) {
+		auto compiled = CompileTemplate(bind_data, expression.GetData(), expression.GetSize());
+		if (lstate.inline_templates.size() >= TeraRenderLocalState::MAX_INLINE_TEMPLATES) {
+			lstate.inline_templates.clear();
+		}
+		entry = lstate.inline_templates.emplace(key, std::move(compiled)).first;
+	}
+	lstate.last_template = std::move(key);
+	lstate.last_compiled = entry->second.get();
+	return *lstate.last_compiled;
+}
+
+static string_t RenderToVector(Vector &result, TeraRenderLocalState &lstate, const TeraRenderBindData &bind_data,
+                               string_t expression, const char *context_json, idx_t context_json_len) {
+	auto &compiled = GetCompiledTemplate(lstate, bind_data, expression);
+	ResultCString eval_result =
+	    render_compiled_template(&compiled, expression.GetData(), expression.GetSize(), context_json, context_json_len);
+	if (eval_result.tag == ResultCString::Tag::Err) {
+		string err_str = string(eval_result.err._0);
+		free_result_cstring(eval_result);
+		throw InvalidInputException("Error rendering template: " + err_str);
+	}
+	auto vector_result = StringVector::AddString(result, eval_result.ok._0);
+	free_result_cstring(eval_result);
+	return vector_result;
+}
+
+inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &result) {
+	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	const auto &bind_data = func_expr.bind_info->Cast<TeraRenderBindData>();
+	auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<TeraRenderLocalState>();
+
+	auto &expression_vector = args.data[0];
 
 	if (args.ColumnCount() - bind_data.optional_args == 2) {
 		// There can be a context column.
@@ -123,35 +204,13 @@ inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &resu
 		BinaryExecutor::Execute<string_t, string_t, string_t>(
 		    expression_vector, context_json_vector, result, args.size(),
 		    [&](string_t expression, string_t context_json) {
-			    ResultCString eval_result =
-			        render_template(expression.GetData(), expression.GetSize(), context_json.GetData(),
-			                        context_json.GetSize(), bind_data.template_path.c_str(), bind_data.autoescape,
-			                        autoescape_on_ptrs.data(), static_cast<int32_t>(autoescape_on_ptrs.size()));
-			    if (eval_result.tag == ResultCString::Tag::Err) {
-				    string err_str = string(eval_result.err._0);
-				    free_result_cstring(eval_result);
-				    throw InvalidInputException("Error rendering template: " + err_str);
-			    } else {
-				    auto vector_result = StringVector::AddString(result, eval_result.ok._0);
-				    free_result_cstring(eval_result);
-				    return vector_result;
-			    }
+			    return RenderToVector(result, lstate, bind_data, expression, context_json.GetData(),
+			                          context_json.GetSize());
 		    });
 	} else if (args.ColumnCount() - bind_data.optional_args == 1) {
 		// No context column.
 		UnaryExecutor::Execute<string_t, string_t>(expression_vector, result, args.size(), [&](string_t expression) {
-			ResultCString eval_result = render_template(
-			    expression.GetData(), expression.GetSize(), "{}", 2, bind_data.template_path.c_str(),
-			    bind_data.autoescape, autoescape_on_ptrs.data(), static_cast<int32_t>(autoescape_on_ptrs.size()));
-			if (eval_result.tag == ResultCString::Tag::Err) {
-				string err_str = string(eval_result.err._0);
-				free_result_cstring(eval_result);
-				throw InvalidInputException("Error rendering template: " + err_str);
-			} else {
-				auto vector_result = StringVector::AddString(result, eval_result.ok._0);
-				free_result_cstring(eval_result);
-				return vector_result;
-			}
+			return RenderToVector(result, lstate, bind_data, expression, "{}", 2);
 		});
 	} else {
 		throw InvalidInputException("Invalid number of arguments to tera_render");
@@ -168,6 +227,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		                   TeraRenderBind, nullptr, nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
 		render_with_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
 		render_with_context.stability = FunctionStability::VOLATILE;
+		render_with_context.init_local_state = TeraRenderInitLocalState;
 		render.AddFunction(render_with_context);
 
 		auto render_no_context =
@@ -175,6 +235,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		                   nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
 		render_no_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
 		render_no_context.stability = FunctionStability::VOLATILE;
+		render_no_context.init_local_state = TeraRenderInitLocalState;
 		render.AddFunction(render_no_context);
 
 		CreateScalarFunctionInfo info(render);
