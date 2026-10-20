@@ -54,3 +54,98 @@ SELECT tera_render('{{color}}', v) from render_data order by 1;
 ----
 blue
 red
+
+# The options are keyword-only parameters with defaults; duckdb_functions()
+# lists them after the positional arguments of each overload.
+query III
+SELECT function_name, parameters, parameter_types
+FROM duckdb_functions()
+WHERE function_name = 'tera_render'
+ORDER BY len(parameters)
+----
+tera_render	[template, autoescape, template_path, autoescape_extensions]	[VARCHAR, BOOLEAN, VARCHAR, 'VARCHAR[]']
+tera_render	[template, context, autoescape, template_path, autoescape_extensions]	[VARCHAR, JSON, BOOLEAN, VARCHAR, 'VARCHAR[]']
+
+query II
+SELECT description IS NOT NULL, categories
+FROM duckdb_functions()
+WHERE function_name = 'tera_render'
+ORDER BY len(parameters)
+----
+true	[text, template]
+true	[text, template]
+
+# The positional arguments can also be passed by name, in any order.
+query T
+SELECT tera_render(context := '{"a": 1}', template := '{{ a }}')
+----
+1
+
+# Explicitly passing the defaults matches the default behavior.
+query T
+SELECT tera_render('{{ v }}', '{"v": "B&O"}', autoescape := true, template_path := '', autoescape_extensions := [])
+----
+B&amp;O
+
+# Options work for the overload without a context too.
+query T
+SELECT tera_render('{{ "B&O" }}', autoescape := false)
+----
+B&O
+
+query T
+SELECT tera_render('{{ "B&O" }}')
+----
+B&amp;O
+
+# Unknown option names are rejected.
+statement error
+SELECT tera_render('Hello', bogus := 1)
+----
+No function matches the given name and argument types 'tera_render(STRING_LITERAL, "bogus" := INTEGER_LITERAL)'
+
+statement error
+SELECT tera_render('Hello', '{}', autoescap := false)
+----
+No function matches the given name and argument types
+
+# The options are typed: values that cannot be cast implicitly are rejected.
+statement error
+SELECT tera_render('Hello', autoescape := 1)
+----
+No function matches the given name and argument types 'tera_render(STRING_LITERAL, "autoescape" := INTEGER_LITERAL)'
+
+statement error
+SELECT tera_render('Hello', '{}', autoescape_extensions := [1, 2])
+----
+No function matches the given name and argument types
+
+# String literals are cast to the declared type.
+query T
+SELECT tera_render('{{ v }}', '{"v": "B&O"}', autoescape := 'false')
+----
+B&O
+
+# The options must be constants.
+statement error
+SELECT tera_render('Hello', autoescape := random() > 0.5)
+----
+must be a constant expression
+
+statement error
+SELECT tera_render('Hello', autoescape_extensions := ['html', NULL])
+----
+Binder Error: tera_render: 'autoescape_extensions' must not contain NULL
+
+# Options are keyword-only: they cannot be passed by position.
+statement error
+SELECT tera_render('Hello', '{}', false)
+----
+No function matches the given name and argument types
+
+# tera_render uses default NULL handling: a NULL argument, including a NULL
+# option, makes the result NULL.
+query T
+SELECT tera_render('x', autoescape := NULL)
+----
+NULL
