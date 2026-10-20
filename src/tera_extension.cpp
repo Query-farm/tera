@@ -7,6 +7,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include "rust.h"
 #include "query_farm_telemetry.hpp"
@@ -42,8 +43,10 @@ bool TeraRenderBindData::Equals(const FunctionData &other_p) const {
 	       autoescape_on == other.autoescape_on && optional_args == other.optional_args;
 }
 
-unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &bound_function,
-                                        vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> TeraRenderBind(BindScalarFunctionInput &input) {
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	auto argument_names = input.GetArgumentNames();
 	if (arguments.empty()) {
 		throw BinderException("tera_render takes at least one argument");
 	}
@@ -54,9 +57,12 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 	vector<string> autoescape_on;
 	int optional_args = 0;
 
-	for (idx_t i = bound_function.arguments.size(); i < arguments.size(); i++) {
+	for (idx_t i = bound_function.GetStandardArgumentCount(); i < arguments.size(); i++) {
 		const auto &arg = arguments[i];
-		const auto &alias = arg->GetAlias();
+		if (!argument_names || i >= argument_names->size()) {
+			continue;
+		}
+		const auto alias = (*argument_names)[i].GetIdentifierName();
 		if (alias == "") {
 			continue;
 		}
@@ -68,27 +74,27 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 		}
 		if (alias == "autoescape") {
 			optional_args++;
-			if (arg->return_type.id() != LogicalTypeId::BOOLEAN) {
+			if (arg->GetReturnType().id() != LogicalTypeId::BOOLEAN) {
 				throw BinderException("tera_render: 'autoescape' argument must be a BOOLEAN");
 			}
-			autoescape = BooleanValue::Get(ExpressionExecutor::EvaluateScalar(context, *arg));
+			autoescape = BooleanValue::Get(input.GetConstant(i));
 		} else if (alias == "template_path") {
 			optional_args++;
 
-			if (arg->return_type.id() != LogicalTypeId::VARCHAR) {
+			if (arg->GetReturnType().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("tera_render: 'template_path' argument must be a VARCHAR");
 			}
-			template_path = StringValue::Get(ExpressionExecutor::EvaluateScalar(context, *arg));
+			template_path = StringValue::Get(input.GetConstant(i));
 		} else if (alias == "autoescape_extensions") {
 			optional_args++;
 
-			if (arg->return_type.InternalType() != PhysicalType::LIST) {
+			if (arg->GetReturnType().InternalType() != PhysicalType::LIST) {
 				throw BinderException(StringUtil::Format(
 				    "tera_render: 'autoescape_extensions' argument must be a list of strings it is %s",
-				    arg->return_type.ToString()));
+				    arg->GetReturnType().ToString()));
 			}
 
-			const auto list_children = ListValue::GetChildren(ExpressionExecutor::EvaluateScalar(context, *arg));
+			const auto list_children = ListValue::GetChildren(input.GetConstant(i));
 			for (const auto &list_item : list_children) {
 				if (list_item.type() != LogicalType::VARCHAR) {
 					throw BinderException(StringUtil::Format(
@@ -108,7 +114,7 @@ unique_ptr<FunctionData> TeraRenderBind(ClientContext &context, ScalarFunction &
 
 inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &result) {
 	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto &bind_data = func_expr.bind_info->Cast<TeraRenderBindData>();
+	const auto &bind_data = func_expr.BindInfo()->Cast<TeraRenderBindData>();
 
 	auto &expression_vector = args.data[0];
 
@@ -121,8 +127,7 @@ inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &resu
 		// There can be a context column.
 		auto &context_json_vector = args.data[1];
 		BinaryExecutor::Execute<string_t, string_t, string_t>(
-		    expression_vector, context_json_vector, result, args.size(),
-		    [&](string_t expression, string_t context_json) {
+		    expression_vector, context_json_vector, result, [&](string_t expression, string_t context_json) {
 			    ResultCString eval_result =
 			        render_template(expression.GetData(), expression.GetSize(), context_json.GetData(),
 			                        context_json.GetSize(), bind_data.template_path.c_str(), bind_data.autoescape,
@@ -139,7 +144,7 @@ inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &resu
 		    });
 	} else if (args.ColumnCount() - bind_data.optional_args == 1) {
 		// No context column.
-		UnaryExecutor::Execute<string_t, string_t>(expression_vector, result, args.size(), [&](string_t expression) {
+		UnaryExecutor::Execute<string_t, string_t>(expression_vector, result, [&](string_t expression) {
 			ResultCString eval_result = render_template(
 			    expression.GetData(), expression.GetSize(), "{}", 2, bind_data.template_path.c_str(),
 			    bind_data.autoescape, autoescape_on_ptrs.data(), static_cast<int32_t>(autoescape_on_ptrs.size()));
@@ -163,20 +168,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	{
 		ScalarFunctionSet render("tera_render");
 
-		auto render_with_context =
-		    ScalarFunction({LogicalType::VARCHAR, LogicalType::JSON()}, LogicalType::VARCHAR, TeraRenderFunc,
-		                   TeraRenderBind, nullptr, nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
-		render_with_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
-		render_with_context.stability = FunctionStability::VOLATILE;
+		auto render_with_context = ScalarFunction({LogicalType::VARCHAR, LogicalType::JSON()}, LogicalType::VARCHAR,
+		                                          TeraRenderFunc, TeraRenderBind);
+		// Optional settings (autoescape, template_path, ...) are passed as named arguments
+		render_with_context.GetSignature().AddKwargs("kwargs", LogicalType::ANY);
+		render_with_context.SetNullHandling(FunctionNullHandling::DEFAULT_NULL_HANDLING);
+		render_with_context.SetVolatile();
 		render.AddFunction(render_with_context);
 
 		auto render_no_context =
-		    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, TeraRenderFunc, TeraRenderBind, nullptr,
-		                   nullptr, nullptr, LogicalType(LogicalTypeId::ANY));
-		render_no_context.null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING;
-		render_no_context.stability = FunctionStability::VOLATILE;
+		    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, TeraRenderFunc, TeraRenderBind);
+		render_no_context.GetSignature().AddKwargs("kwargs", LogicalType::ANY);
+		render_no_context.SetNullHandling(FunctionNullHandling::DEFAULT_NULL_HANDLING);
+		render_no_context.SetVolatile();
 		render.AddFunction(render_no_context);
 
+		render.SetFallible();
 		CreateScalarFunctionInfo info(render);
 
 		// Documentation for tera_render(template, context) variant
