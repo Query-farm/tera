@@ -149,3 +149,48 @@ query T
 SELECT tera_render('x', autoescape := NULL)
 ----
 NULL
+
+# A constant template is parsed once per thread and reused for every row.
+query II
+SELECT count(*), sum(length(tera_render('{{ a }}-{{ b | upper }}', json_object('a', i, 'b', 'x'))))
+FROM range(100000) t(i)
+----
+100000	688890
+
+# Templates that differ between rows are each parsed and cached; more distinct
+# templates than the per-thread cache holds still render correctly.
+query II
+SELECT count(*), sum(CASE WHEN r = i::VARCHAR || ':' || (i * 2)::VARCHAR THEN 1 ELSE 0 END)
+FROM (SELECT i, tera_render(i::VARCHAR || ':{{ n }}', json_object('n', i * 2)) AS r FROM range(1000) t(i))
+----
+1000	1000
+
+query II
+SELECT i, tera_render(CASE WHEN i % 3 = 0 THEN '<{{ v }}>' WHEN i % 3 = 1 THEN '[{{ v }}]' ELSE '({{ v }})' END,
+                      json_object('v', '&'))
+FROM range(6) t(i) ORDER BY 1
+----
+0	<&amp;>
+1	[&amp;]
+2	(&amp;)
+3	<&amp;>
+4	[&amp;]
+5	(&amp;)
+
+# NULL templates and contexts give NULL without being parsed.
+query T
+SELECT tera_render(t, '{}') FROM (VALUES (NULL::VARCHAR), ('ok')) v(t) ORDER BY 1 NULLS FIRST
+----
+NULL
+ok
+
+# Template syntax errors are reported when the template is first used.
+statement error
+SELECT tera_render('{{ a ', '{"a": 1}')
+----
+Invalid Input Error: Error rendering template: Tera render error: Failed to parse '__tera_one_off'
+
+statement error
+SELECT tera_render(CASE WHEN i < 5 THEN '{{ a }}' ELSE '{% if %}' END, '{"a": 1}') FROM range(10) t(i)
+----
+Failed to parse '__tera_one_off'
