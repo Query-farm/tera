@@ -1,261 +1,165 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "tera_extension.hpp"
-#include "duckdb.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/function/scalar_function.hpp"
-#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
-#include "duckdb/parser/parsed_data/create_function_info.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/execution/expression_executor_state.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/extension_load_options.hpp"
+#include "duckdb/main/extension_repository_manager.hpp"
 
-#include "rust.h"
-#include "query_farm_telemetry.hpp"
+// For DuckDB 2.0 and later this extension is distributed from the Query.Farm extension repository. The build published to the
+// DuckDB community repository only keeps the name. When the user has already added the Query.Farm repository and
+// installed the extension from it, loading this build loads that one; otherwise it explains the remaining steps.
+// It never adds the repository or installs anything itself: trusting a repository is the user's decision.
 
 namespace duckdb {
 
-// Extension version - update this when releasing new versions
-constexpr const char *TERA_EXTENSION_VERSION = "2026102003";
+static constexpr const char *EXTENSION_NAME = "tera";
+static constexpr const char *EXTENSION_VERSION = "2026102001";
+static constexpr const char *REPOSITORY_NAME = "query_farm";
+static constexpr const char *REPOSITORY_URL = "https://duckdb-extensions.query.farm";
+static constexpr const char *REPOSITORY_HTTP_URL = "http://duckdb-extensions.query.farm";
+// sha256 fingerprints of the Query.Farm repository signing keys (primary and standby)
+static constexpr const char *REPOSITORY_KEY_FINGERPRINTS[] = {
+    "sha256:b293ba6145db8f51f301618f59a720cb8c0c21e7efc6119aab43ea5c708947b5",
+    "sha256:6959de1c16b783b14d4c904f69361811f737017d79ea7078729a74ec2f7f7753"};
 
-// The options of both tera_render overloads. They are keyword-only parameters, so DuckDB matches the names,
-// casts the values to the declared types and fills in the defaults before the bind callback runs.
-static void AddRenderOptions(ScalarFunction &function) {
-	function.GetSignature()
-	    .AddKeywordOnly("autoescape", LogicalType::BOOLEAN, Value::BOOLEAN(true))
-	    .AddKeywordOnly("template_path", LogicalType::VARCHAR, Value(""))
-	    .AddKeywordOnly("autoescape_extensions", LogicalType::LIST(LogicalType::VARCHAR),
-	                    Value::LIST(LogicalType::VARCHAR, vector<Value>()));
+static string MovedPreamble() {
+	return StringUtil::Format("The %s extension for DuckDB 2.0 and later is distributed from the Query.Farm extension repository, "
+	                          "not the DuckDB community repository.\n\n",
+	                          EXTENSION_NAME);
 }
 
-struct TeraRenderBindData : public FunctionData {
-	bool has_context;
-	string template_path;
-	bool autoescape = true;
-	vector<string> autoescape_on;
+static string MoreInformation() {
+	return StringUtil::Format("\n\nMore information: https://query.farm/products/extensions/%s/", EXTENSION_NAME);
+}
 
-	TeraRenderBindData(bool has_context_p, string template_path_p, bool autoescape_p, vector<string> autoescape_on_p)
-	    : has_context(has_context_p), template_path(std::move(template_path_p)), autoescape(autoescape_p),
-	      autoescape_on(std::move(autoescape_on_p)) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<TeraRenderBindData>(has_context, template_path, autoescape, autoescape_on);
-	}
-
-	bool Equals(const FunctionData &other_p) const override {
-		auto &other = other_p.Cast<TeraRenderBindData>();
-		return has_context == other.has_context && template_path == other.template_path &&
-		       autoescape == other.autoescape && autoescape_on == other.autoescape_on;
-	}
-};
-
-static unique_ptr<FunctionData> TeraRenderBindInternal(BindScalarFunctionInput &input, bool has_context) {
-	const auto autoescape = BooleanValue::Get(input.GetNonNullConstant("autoescape"));
-	auto template_path = StringValue::Get(input.GetNonNullConstant("template_path"));
-
-	// Keep the list value alive while iterating: ListValue::GetChildren returns a reference into it.
-	const auto extensions = input.GetNonNullConstant("autoescape_extensions");
-	vector<string> autoescape_on;
-	for (const auto &extension : ListValue::GetChildren(extensions)) {
-		if (extension.IsNull()) {
-			throw BinderException("tera_render: 'autoescape_extensions' must not contain NULL");
+static bool IsInstalledFromRepository(DatabaseInstance &db, FileSystem &fs) {
+	for (auto &directory : ExtensionHelper::GetExtensionDirectoryPath(db, fs)) {
+		auto path = fs.JoinPath(fs.JoinPath(fs.JoinPath(directory, "repositories"), REPOSITORY_NAME),
+		                        string(EXTENSION_NAME) + ".duckdb_extension");
+		if (fs.FileExists(path)) {
+			return true;
 		}
-		autoescape_on.push_back(StringValue::Get(extension));
 	}
-
-	return make_uniq<TeraRenderBindData>(has_context, std::move(template_path), autoescape, std::move(autoescape_on));
+	return false;
 }
 
-static unique_ptr<FunctionData> TeraRenderBind(BindScalarFunctionInput &input) {
-	return TeraRenderBindInternal(input, false);
-}
-
-static unique_ptr<FunctionData> TeraRenderWithContextBind(BindScalarFunctionInput &input) {
-	return TeraRenderBindInternal(input, true);
-}
-
-struct CompiledTemplateDeleter {
-	void operator()(CompiledTemplate *compiled) const {
-		free_compiled_template(compiled);
+// A repository named query_farm is only used when it points at the Query.Farm prefix and pins a Query.Farm signing key.
+static bool IsQueryFarmRepository(const ExtensionRepository &repository) {
+	auto prefix = StringUtil::Lower(repository.path);
+	while (StringUtil::EndsWith(prefix, "/")) {
+		prefix.pop_back();
 	}
-};
-using CompiledTemplatePtr = std::unique_ptr<CompiledTemplate, CompiledTemplateDeleter>;
-
-// Parsing a template (and, for template_path, loading the files) costs far more than rendering it, so each
-// thread keeps the templates it has parsed for the duration of the query and renders every row from them.
-struct TeraRenderLocalState : public FunctionLocalState {
-	//! Inline templates, keyed by template text. A constant template argument is parsed once; a template
-	//! that differs between rows is cached up to MAX_INLINE_TEMPLATES distinct texts at a time.
-	static constexpr idx_t MAX_INLINE_TEMPLATES = 64;
-	unordered_map<string, CompiledTemplatePtr> inline_templates;
-	//! The most recently used inline template, checked before the map
-	string last_template;
-	optional_ptr<CompiledTemplate> last_compiled;
-	//! The templates loaded from template_path; loaded on the first non-NULL row
-	CompiledTemplatePtr path_templates;
-};
-
-static unique_ptr<FunctionLocalState>
-TeraRenderInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data) {
-	return make_uniq<TeraRenderLocalState>();
-}
-
-static CompiledTemplatePtr CompileTemplate(const TeraRenderBindData &bind_data, const char *source, idx_t source_len) {
-	vector<const char *> autoescape_on_ptrs;
-	for (const auto &s : bind_data.autoescape_on) {
-		autoescape_on_ptrs.push_back(s.c_str());
+	if (prefix != REPOSITORY_URL && prefix != REPOSITORY_HTTP_URL) {
+		return false;
 	}
-	CompileResult compiled = compile_template(source, source_len, bind_data.template_path.c_str(), bind_data.autoescape,
-	                                          autoescape_on_ptrs.data(), autoescape_on_ptrs.size());
-	if (compiled.tag == CompileResult::Tag::Err) {
-		string err_str = string(compiled.err._0);
-		free_compile_error(compiled.err._0);
-		throw InvalidInputException("Error rendering template: " + err_str);
-	}
-	return CompiledTemplatePtr(compiled.ok._0);
-}
-
-static CompiledTemplate &GetCompiledTemplate(TeraRenderLocalState &lstate, const TeraRenderBindData &bind_data,
-                                             string_t expression) {
-	if (!bind_data.template_path.empty()) {
-		// The template argument names a template within the loaded set
-		if (!lstate.path_templates) {
-			lstate.path_templates = CompileTemplate(bind_data, "", 0);
+	for (auto &key : repository.public_keys) {
+		auto fingerprint = ExtensionRepositoryManager::GetPublicKeyFingerprint(key);
+		for (auto trusted : REPOSITORY_KEY_FINGERPRINTS) {
+			if (fingerprint == trusted) {
+				return true;
+			}
 		}
-		return *lstate.path_templates;
+	}
+	return false;
+}
+
+static void LoadFromQueryFarmOrExplain(DatabaseInstance &db) {
+	auto &fs = FileSystem::GetFileSystem(db);
+	ExtensionRepository repository;
+	bool has_repository = ExtensionRepositoryManager::TryGetRepository(db, fs, REPOSITORY_NAME, repository);
+
+	if (!has_repository) {
+		throw MissingExtensionException(
+		    "%sAdd the repository and install the extension once:\n"
+		    "\n"
+		    "    SET allow_extension_repositories = 'allowed';\n"
+		    "    CREATE EXTENSION REPOSITORY IF NOT EXISTS %s WITH PREFIX '%s';\n"
+		    "    INSTALL %s FROM %s;\n"
+		    "\n"
+		    "Then load it in each session with:\n"
+		    "\n"
+		    "    LOAD %s FROM %s;%s",
+		    MovedPreamble(), REPOSITORY_NAME, REPOSITORY_URL, EXTENSION_NAME, REPOSITORY_NAME, EXTENSION_NAME,
+		    REPOSITORY_NAME, MoreInformation());
+	}
+	if (!IsQueryFarmRepository(repository)) {
+		throw MissingExtensionException(
+		    "%sA repository named %s is configured with the prefix '%s', but it is not the Query.Farm extension "
+		    "repository: it points somewhere else or does not use the Query.Farm signing keys, so the extension is not "
+		    "loaded from it. Replace it with the Query.Farm repository and reinstall the extension:\n"
+		    "\n"
+		    "    SET allow_extension_repositories = 'allowed';\n"
+		    "    CREATE OR REPLACE EXTENSION REPOSITORY %s WITH PREFIX '%s';\n"
+		    "    FORCE INSTALL %s FROM %s;\n"
+		    "\n"
+		    "Then load it in each session with:\n"
+		    "\n"
+		    "    LOAD %s FROM %s;%s",
+		    MovedPreamble(), REPOSITORY_NAME, repository.path, REPOSITORY_NAME, REPOSITORY_URL, EXTENSION_NAME,
+		    REPOSITORY_NAME, EXTENSION_NAME, REPOSITORY_NAME, MoreInformation());
+	}
+	if (ExtensionRepositoryManager::GetAccess(db) == ExtensionRepositoryAccess::FORBIDDEN) {
+		throw MissingExtensionException("%sThe %s repository is configured, but allow_extension_repositories is set to "
+		                                "'forbidden', so extensions from it cannot be loaded.%s",
+		                                MovedPreamble(), REPOSITORY_NAME, MoreInformation());
+	}
+	if (!IsInstalledFromRepository(db, fs)) {
+		throw MissingExtensionException("%sThe %s repository is already configured. Install the extension from it once:\n"
+		                                "\n"
+		                                "    SET allow_extension_repositories = 'allowed';\n"
+		                                "    INSTALL %s FROM %s;\n"
+		                                "\n"
+		                                "Then load it in each session with:\n"
+		                                "\n"
+		                                "    LOAD %s FROM %s;%s",
+		                                MovedPreamble(), REPOSITORY_NAME, EXTENSION_NAME, REPOSITORY_NAME,
+		                                EXTENSION_NAME, REPOSITORY_NAME, MoreInformation());
 	}
 
-	if (lstate.last_compiled && expression.GetSize() == lstate.last_template.size() &&
-	    memcmp(expression.GetData(), lstate.last_template.data(), expression.GetSize()) == 0) {
-		return *lstate.last_compiled;
-	}
-	auto key = expression.GetString();
-	auto entry = lstate.inline_templates.find(key);
-	if (entry == lstate.inline_templates.end()) {
-		auto compiled = CompileTemplate(bind_data, expression.GetData(), expression.GetSize());
-		if (lstate.inline_templates.size() >= TeraRenderLocalState::MAX_INLINE_TEMPLATES) {
-			lstate.inline_templates.clear();
+	// The repository is trusted and the extension is installed from it: load that build. DuckDB holds the load lock
+	// for this name while this stub initializes, so the real extension is loaded under an alias; its functions are
+	// registered as usual.
+	ExtensionLoadOptions options(EXTENSION_NAME);
+	options.repository = REPOSITORY_NAME;
+	options.alias = Identifier(string(EXTENSION_NAME) + "_" + REPOSITORY_NAME);
+	try {
+		ExtensionHelper::LoadExternalExtension(db, fs, options);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() != ExceptionType::IO || !StringUtil::Contains(error.RawMessage(), "signature")) {
+			throw;
 		}
-		entry = lstate.inline_templates.emplace(key, std::move(compiled)).first;
+		throw MissingExtensionException(
+		    "%sThe %s extension installed from the %s repository failed signature verification. The file may be "
+		    "damaged, or it was signed with a key that this repository definition does not trust. Reinstall it:\n"
+		    "\n"
+		    "    SET allow_extension_repositories = 'allowed';\n"
+		    "    FORCE INSTALL %s FROM %s;\n"
+		    "\n"
+		    "If loading still fails the same way, refresh the repository's signing keys and reinstall:\n"
+		    "\n"
+		    "    CREATE OR REPLACE EXTENSION REPOSITORY %s WITH PREFIX '%s';\n"
+		    "    FORCE INSTALL %s FROM %s;\n"
+		    "\n"
+		    "Do not use -unsigned to work around this.%s",
+		    MovedPreamble(), EXTENSION_NAME, REPOSITORY_NAME, EXTENSION_NAME, REPOSITORY_NAME, REPOSITORY_NAME,
+		    REPOSITORY_URL, EXTENSION_NAME, REPOSITORY_NAME, MoreInformation());
 	}
-	lstate.last_template = std::move(key);
-	lstate.last_compiled = entry->second.get();
-	return *lstate.last_compiled;
-}
-
-static string_t RenderToVector(Vector &result, TeraRenderLocalState &lstate, const TeraRenderBindData &bind_data,
-                               string_t expression, const char *context_json, idx_t context_json_len) {
-	auto &compiled = GetCompiledTemplate(lstate, bind_data, expression);
-	ResultCString eval_result =
-	    render_compiled_template(&compiled, expression.GetData(), expression.GetSize(), context_json, context_json_len);
-	if (eval_result.tag == ResultCString::Tag::Err) {
-		string err_str = string(eval_result.err._0);
-		free_result_cstring(eval_result);
-		throw InvalidInputException("Error rendering template: " + err_str);
-	}
-	auto vector_result = StringVector::AddString(result, eval_result.ok._0);
-	free_result_cstring(eval_result);
-	return vector_result;
-}
-
-inline void TeraRenderFunc(DataChunk &args, ExpressionState &state, Vector &result) {
-	const auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const auto &bind_data = func_expr.BindInfo()->Cast<TeraRenderBindData>();
-	auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<TeraRenderLocalState>();
-
-	// The keyword-only options follow the positional arguments in the chunk; their values were captured at bind.
-	auto &expression_vector = args.data[0];
-
-	if (bind_data.has_context) {
-		auto &context_json_vector = args.data[1];
-		BinaryExecutor::Execute<string_t, string_t, string_t>(
-		    expression_vector, context_json_vector, result, [&](string_t expression, string_t context_json) {
-			    return RenderToVector(result, lstate, bind_data, expression, context_json.GetData(),
-			                          context_json.GetSize());
-		    });
-	} else {
-		UnaryExecutor::Execute<string_t, string_t>(expression_vector, result, [&](string_t expression) {
-			return RenderToVector(result, lstate, bind_data, expression, "{}", 2);
-		});
-	}
-}
-
-static FunctionDescription MakeDescription(vector<string> names, vector<LogicalType> types, string description,
-                                           vector<string> examples) {
-	FunctionDescription desc;
-	// The keyword-only options, in the order AddRenderOptions declares them
-	names.insert(names.end(), {"autoescape", "template_path", "autoescape_extensions"});
-	types.insert(types.end(), {LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR)});
-	desc.parameter_names = std::move(names);
-	desc.parameter_types = std::move(types);
-	desc.description = std::move(description);
-	desc.examples = std::move(examples);
-	desc.categories = {"text", "template"};
-	return desc;
-}
-
-// Extension initalization.
-static void LoadInternal(ExtensionLoader &loader) {
-	{
-		ScalarFunctionSet render("tera_render");
-
-		// tera_render(template, context, *, autoescape, template_path, autoescape_extensions)
-		ScalarFunction render_with_context({}, LogicalType::VARCHAR, TeraRenderFunc, TeraRenderWithContextBind);
-		render_with_context.GetSignature()
-		    .AddParameter("template", LogicalType::VARCHAR)
-		    .AddParameter("context", LogicalType::JSON());
-		AddRenderOptions(render_with_context);
-		render_with_context.SetNullHandling(FunctionNullHandling::DEFAULT_NULL_HANDLING);
-		render_with_context.SetVolatile();
-		render_with_context.SetInitStateCallback(TeraRenderInitLocalState);
-		render.AddFunction(render_with_context);
-
-		// tera_render(template, *, autoescape, template_path, autoescape_extensions)
-		ScalarFunction render_no_context({}, LogicalType::VARCHAR, TeraRenderFunc, TeraRenderBind);
-		render_no_context.GetSignature().AddParameter("template", LogicalType::VARCHAR);
-		AddRenderOptions(render_no_context);
-		render_no_context.SetNullHandling(FunctionNullHandling::DEFAULT_NULL_HANDLING);
-		render_no_context.SetVolatile();
-		render_no_context.SetInitStateCallback(TeraRenderInitLocalState);
-		render.AddFunction(render_no_context);
-
-		render.SetFallible();
-		CreateScalarFunctionInfo info(render);
-
-		static constexpr const char *OPTIONS_HELP =
-		    " Options are passed by name: autoescape (default true), template_path (a glob of template files to load, "
-		    "default none; the template argument is then a template name) and autoescape_extensions (default []: when "
-		    "autoescape is on, every template is escaped; a list restricts "
-		    "escaping of template_path templates to file names ending in one of the given suffixes)";
-
-		info.descriptions.push_back(MakeDescription(
-		    {"template", "context"}, {LogicalType::VARCHAR, LogicalType::JSON()},
-		    string("Renders a Tera template string with JSON context variables.") + OPTIONS_HELP,
-		    {"tera_render('Hello {{ name }}!', '{\"name\": \"World\"}')",
-		     "tera_render('{{ value | upper }}', '{\"value\": \"hello\"}')",
-		     "tera_render('{{ v }}', '{\"v\": \"B&O\"}', autoescape := false)"}));
-
-		info.descriptions.push_back(
-		    MakeDescription({"template"}, {LogicalType::VARCHAR},
-		                    string("Renders a Tera template string without context variables.") + OPTIONS_HELP,
-		                    {"tera_render('Hello World!')"}));
-
-		loader.RegisterFunction(info);
-	}
-
-	QueryFarmSendTelemetry(loader, "tera", TERA_EXTENSION_VERSION);
 }
 
 void TeraExtension::Load(ExtensionLoader &loader) {
-	LoadInternal(loader);
+	LoadFromQueryFarmOrExplain(loader.GetDatabaseInstance());
 }
+
 std::string TeraExtension::Name() {
-	return "tera";
+	return EXTENSION_NAME;
 }
 
 std::string TeraExtension::Version() const {
-	return TERA_EXTENSION_VERSION;
+	return EXTENSION_VERSION;
 }
 
 } // namespace duckdb
@@ -263,6 +167,6 @@ std::string TeraExtension::Version() const {
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(tera, loader) {
-	duckdb::LoadInternal(loader);
+	duckdb::LoadFromQueryFarmOrExplain(loader.GetDatabaseInstance());
 }
 }
