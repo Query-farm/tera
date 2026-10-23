@@ -7,22 +7,15 @@
   </a>
 </p>
 
-# DuckDB [Tera](https://keats.github.io/tera/) Extension by [Query.Farm](https://query.farm)
+# Tera Extension for DuckDB
 
-[![DuckDB](https://img.shields.io/badge/DuckDB-community_extension-fdf1e0?logo=duckdb&logoColor=fff000)](https://duckdb.org/community_extensions/extensions/tera.html)
-[![v1.5 build](https://github.com/Query-farm/tera/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=v1.5)](https://github.com/Query-farm/tera/actions/workflows/MainDistributionPipeline.yml?query=branch%3Av1.5)
+[![DuckDB](https://img.shields.io/badge/DuckDB-extension-fdf1e0?logo=duckdb&logoColor=fff000)](https://query.farm/products/extensions/tera/)
+[![v2.0 build](https://github.com/Query-farm/tera/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=v2.0)](https://github.com/Query-farm/tera/actions/workflows/MainDistributionPipeline.yml?query=branch%3Av2.0)
 
-The **Tera** extension, developed by **[Query.Farm](https://query.farm)**, brings powerful template rendering capabilities directly to your SQL queries in DuckDB. Generate dynamic text, HTML, configuration files, and reports using the robust [Tera](https://keats.github.io/tera/) templating engine without leaving your database environment.
+Render Tera templates from DuckDB SQL.
 
 ## Documentation
 
 Full documentation, including installation, usage, the function reference, and cookbook examples, is available at:
 
-**[https://query.farm/products/extensions/tera](https://query.farm/products/extensions/tera)**
-
-## Installation
-
-```sql
-INSTALL tera FROM community;
-LOAD tera;
-```
+**[https://query.farm/products/extensions/tera/](https://query.farm/products/extensions/tera/)**
