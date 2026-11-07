@@ -1,0 +1,105 @@
+# name: test/sql/tera_security.test
+# description: Tera features that reach outside the database are sandboxed.
+# group: [sql]
+
+require tera
+
+# Tera's built-in get_env() would expose the server's environment variables
+# (cloud credentials, tokens, ...) to any SQL user, so it is disabled by default.
+statement error
+SELECT tera_render('{{ get_env(name="HOME") }}')
+----
+get_env() is disabled
+
+statement error
+SELECT tera_render('{{ get_env(name="TERA_TEST_SURELY_UNSET", default="fallback") }}')
+----
+get_env() is disabled
+
+query I
+SELECT current_setting('tera_allow_get_env')
+----
+false
+
+# It can be enabled explicitly.
+statement ok
+SET tera_allow_get_env = true
+
+query T
+SELECT tera_render('{{ get_env(name="TERA_TEST_SURELY_UNSET", default="fallback") }}')
+----
+fallback
+
+# An inline template cannot include itself (which would recurse until the
+# stack overflows).
+statement error
+SELECT tera_render('x{% include "__tera_one_off" %}')
+----
+includes itself
+
+statement error
+SELECT tera_render('{% if true %}{% for i in [1] %}{% include "__tera_one_off" %}{% endfor %}{% endif %}')
+----
+includes itself
+
+# Including a template that does not exist is an ordinary error.
+statement error
+SELECT tera_render('{% include "other.html" %}')
+----
+Invalid Input Error
+
+# With external access disabled, get_env() stays disabled even when the
+# setting allows it, and template_path cannot read files.
+statement ok
+SET enable_external_access = false
+
+statement error
+SELECT tera_render('{{ get_env(name="TERA_TEST_SURELY_UNSET", default="fallback") }}')
+----
+get_env() is disabled
+
+statement error
+SELECT tera_render('index.html', '{}', template_path := './templates/*.html')
+----
+Permission Error
+
+# Templates nested deeply enough to overflow the stack while Tera parses or
+# renders them are rejected up front (these used to abort the process).
+statement error
+SELECT tera_render('{{ ' || repeat('(', 100000) || '1' || repeat(')', 100000) || ' }}')
+----
+nests brackets more than 64 levels deep
+
+statement error
+SELECT tera_render(repeat('{% if true %}', 20000) || 'x' || repeat('{% endif %}', 20000))
+----
+nests tags more than 64 levels deep
+
+statement error
+SELECT tera_render('{{ 1' || repeat(' + 1', 50000) || ' }}')
+----
+more than 256 operators
+
+# Reasonable nesting still works.
+query T
+SELECT tera_render(repeat('{% if true %}', 60) || 'x' || repeat('{% endif %}', 60))
+----
+x
+
+query T
+SELECT tera_render('{{ ' || repeat('(', 60) || '1' || repeat(')', 60) || ' + 1 }}')
+----
+2
+
+# String literals and raw blocks do not count towards the limits.
+query T
+SELECT tera_render('{{ "' || repeat('(', 1000) || '" | length }}{% raw %}' || repeat('{% if %}', 100) || '{% endraw %}') = '1000' || repeat('{% if %}', 100)
+----
+true
+
+# A template that imports itself is rejected (Tera would recurse forever
+# loading its macros).
+statement error
+SELECT tera_render('{% import "__tera_one_off" as m %}{% macro f(n) %}{{ n }}{% endmacro f %}{{ m::f(n=1) }}')
+----
+includes itself

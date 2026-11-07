@@ -1,0 +1,135 @@
+# name: test/sql/tera_malformed.test
+# description: Malformed input gives errors, never crashes.
+# group: [sql]
+
+require tera
+
+require json
+
+# The context must be valid JSON...
+statement error
+SELECT tera_render('{{ a }}', '{"a": ')
+----
+Malformed JSON
+
+statement error
+SELECT tera_render('{{ a }}', 'not json')
+----
+Malformed JSON
+
+# ...and a JSON object: other values used to be silently ignored.
+statement error
+SELECT tera_render('x', '[1, 2]')
+----
+Invalid context: expected a JSON object, got an array
+
+statement error
+SELECT tera_render('x', '42')
+----
+Invalid context: expected a JSON object, got a number
+
+statement error
+SELECT tera_render('x', '"s"')
+----
+Invalid context: expected a JSON object, got a string
+
+statement error
+SELECT tera_render('x', 'null')
+----
+Invalid context: expected a JSON object, got null
+
+# A SQL NULL context gives NULL.
+query T
+SELECT tera_render('x', NULL::JSON)
+----
+NULL
+
+query T
+SELECT tera_render('{}', '{}')
+----
+{}
+
+query T
+SELECT tera_render('', '{}')
+----
+(empty)
+
+# NUL bytes cannot be represented in the result and are dropped instead of
+# crashing.
+query T
+SELECT tera_render('a{{ x }}b', '{"x": "\u0000"}', autoescape := false)
+----
+ab
+
+query T
+SELECT tera_render('a' || chr(0) || 'b') = 'ab'
+----
+true
+
+statement error
+SELECT tera_render('{{ x }}', '{"x": "' || chr(0) || '"}')
+----
+Malformed JSON
+
+# Unicode passes through.
+query T
+SELECT tera_render('{{ s | upper }} {{ s | length }}', '{"s": "héllo 🦆"}')
+----
+HÉLLO 🦆 7
+
+# Errors from Tera functions are reported.
+statement error
+SELECT tera_render('{{ throw(message="boom") }}')
+----
+boom
+
+statement error
+SELECT tera_render('{% for %}')
+----
+Failed to parse
+
+# Templates and contexts from a table, with NULLs.
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES
+	('{{ a }}', '{"a": 1}'),
+	(NULL, '{"a": 2}'),
+	('{{ a }}', NULL),
+	('[{{ a }}]', '{"a": "é"}')
+) v(tpl, ctx)
+
+query T
+SELECT tera_render(tpl, ctx) FROM t ORDER BY 1 NULLS FIRST
+----
+NULL
+NULL
+1
+[é]
+
+statement error
+SELECT tera_render(tpl, ctx) FROM (VALUES ('{{ a }}', '{"a": 1}'), ('{{ a }}', '[]')) v(tpl, ctx)
+----
+Invalid context
+
+# Any DuckDB value that casts to JSON can be the context, e.g. a struct or a
+# whole row.
+query T
+SELECT tera_render('{{ a.b }} {{ c | join(sep="-") }}', {'a': {'b': 1}, 'c': [1, 2]})
+----
+1 1-2
+
+query T
+SELECT tera_render('{{ id }}:{{ name }}', to_json(r)) FROM (SELECT 7 AS id, 'duck' AS name) r
+----
+7:duck
+
+query T
+SELECT tera_render('{{ id }}:{{ name }}', r) FROM (SELECT 7 AS id, 'duck' AS name) r
+----
+7:duck
+
+# Deeply nested JSON contexts hit serde_json's recursion limit instead of
+# overflowing the stack.
+statement error
+SELECT tera_render('x', (repeat('[', 100000) || repeat(']', 100000))::VARCHAR)
+----
+Error

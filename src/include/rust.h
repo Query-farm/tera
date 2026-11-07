@@ -38,9 +38,19 @@ struct ResultCString {
  * A parsed template set that can be rendered any number of times.
  *
  * For an inline template it holds that single template; for `template_path` it holds every template
- * matched by the glob, and the template to render is chosen by name for each call.
+ * the caller loaded, and the template to render is chosen by name for each call.
  */
 typedef struct CompiledTemplate CompiledTemplate;
+
+/**
+ * A template loaded by the caller (for `template_path`): its name and its source text.
+ */
+typedef struct TemplateSource {
+	const char *name;
+	uintptr_t name_len;
+	const char *source;
+	uintptr_t source_len;
+} TemplateSource;
 
 struct CompileResult {
 	enum class Tag {
@@ -64,32 +74,34 @@ struct CompileResult {
 };
 
 /**
- * Parses a template once so it can be rendered for many rows.
+ * Parses a template (or a set of templates) once so it can be rendered for many rows.
  *
  * # Arguments
- * * `template_source` - The template content. Ignored when `template_path` is set.
- * * `template_path` - A glob of template files to load, or NULL/empty to compile `template_source`.
+ * * `template_source` - The inline template text. Ignored when `template_count` is non-zero.
+ * * `templates` / `template_count` - Named templates loaded by the caller for `template_path`; the
+ *   template to render is then chosen by name in `render_compiled_template`.
  * * `autoescape` - Whether to HTML-escape the output of `{{ ... }}` expressions.
- * * `autoescape_on` - Suffixes that restrict escaping to `template_path` templates whose file names end
- *   with one of them. When empty, `autoescape` escapes every template regardless of its name. Inline
- *   templates have no file name, so the suffixes do not apply to them.
+ * * `autoescape_on` - Suffixes that restrict escaping to named templates ending with one of them. When
+ *   empty, `autoescape` escapes every template. Inline templates have no name, so they do not apply.
+ * * `allow_get_env` - Whether Tera's `get_env()` function may read environment variables.
  *
  * # Returns
  * * `Ok(handle)` to pass to `render_compiled_template` and finally `free_compiled_template`, or
  *   `Err(message)` to free with `free_compile_error`.
  */
 struct CompileResult compile_template(const char *template_source, uintptr_t template_source_len,
-                                      const char *template_path, bool autoescape, const char *const *autoescape_on,
-                                      uintptr_t autoescape_on_count);
+                                      const struct TemplateSource *templates, uintptr_t template_count,
+                                      bool autoescape, const char *const *autoescape_on,
+                                      uintptr_t autoescape_on_count, bool allow_get_env);
 
 /**
- * Renders a compiled template with context variables provided as JSON.
+ * Renders a compiled template with context variables provided as a JSON object.
  *
  * # Arguments
  * * `compiled` - A handle returned by `compile_template`.
  * * `template_name` - For `template_path` templates, the name of the template to render. Ignored for
  *   inline templates.
- * * `json_context` - JSON string containing context variables.
+ * * `json_context` - JSON object text containing the context variables.
  *
  * # Returns
  * * `Ok(String)` containing the rendered template, or `Err(String)` if rendering fails.
@@ -117,15 +129,9 @@ void free_compile_error(char *message);
 /**
  * Frees the memory allocated for a ResultCString.
  *
- * # Arguments
- * * `result` - The ResultCString to free
- *
  * # Safety
- * This function is unsafe because it takes ownership of raw pointers.
- * The caller must ensure that:
- * - The ResultCString was created by this library
- * - The ResultCString is not used after calling this function
- * - This function is called exactly once for each ResultCString
+ * The ResultCString must have been created by this library, must not be used afterwards, and this
+ * function must be called exactly once for it.
  */
 void free_result_cstring(struct ResultCString result);
 }

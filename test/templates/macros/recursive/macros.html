@@ -1,0 +1,1 @@
+{% macro f(n) %}{{ self::g(n=n) }}{% endmacro f %}{% macro g(n) %}{{ self::f(n=n) }}{% endmacro g %}

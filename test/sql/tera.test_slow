@@ -91,3 +91,66 @@ SELECT count(*), count(DISTINCT r)
 FROM (SELECT tera_render('index.html', json_object('v', i), template_path := './templates/*.html') AS r FROM range(10000) t(i))
 ----
 10000	10000
+
+# A plain file path (no glob characters) loads that one file, named after the
+# file. (Before 2026110701 this panicked inside Tera and aborted the process.)
+query T
+SELECT tera_render('index.html', '{"v": "x"}', template_path := './templates/index.html')
+----
+x
+
+# A glob that matches nothing is an error.
+statement error
+SELECT tera_render('index.html', '{}', template_path := './templates/*.nothing')
+----
+no template files match './templates/*.nothing'
+
+# Templates are named by their path relative to the glob directory, so
+# inheritance and includes across directories work with '**'.
+query T
+SELECT tera_render('page.html', '{"title": "T&C", "msg": "hi"}', template_path := './test/templates/site/**/*.html')
+----
+<html><h1>T&amp;C</h1><p>hi</p></html>
+
+query T
+SELECT tera_render('partials/header.html', '{"title": "x"}', template_path := './test/templates/site/**/*.html')
+----
+<h1>x</h1>
+
+# A template set whose includes form a cycle is rejected instead of recursing
+# until the stack overflows.
+statement error
+SELECT tera_render('a.txt', '{}', template_path := './test/templates/cycle/*.txt')
+----
+includes itself
+
+# Macros from an imported file work, including macros calling each other...
+query T
+SELECT tera_render('page.txt', '{"x": 42}', template_path := './test/templates/macros/ok/*')
+----
+<42>
+
+# ...but recursive macros are rejected: Tera does not limit macro recursion,
+# so a non-terminating one would overflow the stack and abort the process.
+statement error
+SELECT tera_render('page.txt', '{}', template_path := './test/templates/macros/recursive/*')
+----
+Recursive macros are not supported
+
+# Files are read through DuckDB's file system: with external access disabled
+# they are refused unless allowed_directories covers them.
+statement ok
+SET allowed_directories = ['./test/templates/site/']
+
+statement ok
+SET enable_external_access = false
+
+statement error
+SELECT tera_render('index.html', '{"v": "x"}', template_path := './templates/*.html')
+----
+Permission Error
+
+query T
+SELECT tera_render('header.html', '{"title": "ok"}', template_path := './test/templates/site/partials/header.html')
+----
+<h1>ok</h1>

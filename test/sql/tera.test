@@ -75,6 +75,19 @@ ORDER BY len(parameters)
 true	[text, template]
 true	[text, template]
 
+# Every overload has a description, examples and categories.
+query I
+SELECT bool_and(description IS NOT NULL AND len(examples) > 0 AND len(categories) > 0)
+FROM duckdb_functions()
+WHERE function_name = 'tera_render'
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'tera_render' AND stability = 'VOLATILE'
+----
+2
+
 # The positional arguments can also be passed by name, in any order.
 query T
 SELECT tera_render(context := '{"a": 1}', template := '{{ a }}')
